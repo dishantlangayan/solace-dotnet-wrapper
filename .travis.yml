@@ -1,5 +1,11 @@
 language: csharp
 solution: solace-dotnet-wrapper.sln
+matrix:
+  include:
+    - dotnet: 2.2.401
+      mono: none
+      env: DOTNETCORE=2  # optional, can be used to take different code paths in your script
+    - mono: latest
 install:
   - nuget restore solace-dotnet-wrapper.sln
   - nuget install NUnit.Console -Version 3.9.0 -OutputDirectory testrunner
