@@ -17,6 +17,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using System.Timers;
 using Microsoft.Extensions.Logging;
 
@@ -65,8 +66,8 @@ namespace SolaceDotNetWrapper.Core
         }
 
         /// <summary>
-        ///     Handle an incoming message and indicate if caller should continue delivery
-        ///     (returns true) or stop delivery because we've handled the message (returns false).
+        /// Handle an incoming message and indicate if caller should continue delivery
+        /// (returns true) or stop delivery because we've handled the message (returns false).
         /// </summary>
         /// <param name="msg"></param>
         /// <returns></returns>

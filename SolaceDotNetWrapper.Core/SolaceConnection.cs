@@ -21,7 +21,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
 using Microsoft.Extensions.Logging;
-using SolaceDotNetWrapper.Core.Utils;
 using SolaceSystems.Solclient.Messaging;
 
 namespace SolaceDotNetWrapper.Core
@@ -50,26 +49,23 @@ namespace SolaceDotNetWrapper.Core
 
         // We use the TPL DataFlow Library's BufferBlocks to pass messages & events
         // from this wrapper api (producer) to the calling app (consumer)
-        BufferBlock<Message> messageQueue = null;
+        BufferBlock<Message> defaultAppMsgQueue = null;
         List<BufferBlock<ConnectionEvent>> connectionEvtObservers = new List<BufferBlock<ConnectionEvent>>();
 
         // Task completion source for asynchronously waiting for the connection UP event
         TaskCompletionSource<ConnectionEvent> tcsConnection = null;
-
-        // Task completion source for topic subscriptions
-        TaskCompletionSource<bool> tcsTopicSub = null;
 
         public Destination ClientP2PInbox
         {
             get { return p2pInboxInUse; }
         }
 
-        public SolaceConnection(SolaceOptions solaceOptions, BufferBlock<Message> messageQueue, ILoggerFactory loggerFactory)
+        public SolaceConnection(SolaceOptions solaceOptions, BufferBlock<Message> defaultAppMsgQueue, ILoggerFactory loggerFactory)
         {
             this.solaceOptions = solaceOptions;
             this.loggerFactory = loggerFactory;
             this.logger = loggerFactory.CreateLogger<SolaceConnection>();
-            this.messageQueue = messageQueue;
+            this.defaultAppMsgQueue = defaultAppMsgQueue;
             this.flowBindings = new FlowBindings(loggerFactory.CreateLogger<FlowBindings>());
             this.requestMgr = new RequestReplyStateManager(loggerFactory.CreateLogger<RequestReplyStateManager>());
 
@@ -214,6 +210,13 @@ namespace SolaceDotNetWrapper.Core
             }
         }
 
+        /// <summary>
+        /// Sends messages asynchronously. For PersistentMessage types, the
+        /// MessageCorrelationContext provides caller to know if the message was
+        /// acknowledge or not by the Solace Event Broker.
+        /// </summary>
+        /// <param name="message"></param>
+        /// <returns></returns>
         public Task<MessageCorrelationContext> SendAsync(Message message)
         {
             using (var solaceMsg = SolaceNativeMsgAdapter.ConvertToNativeMsg(message))
@@ -253,56 +256,262 @@ namespace SolaceDotNetWrapper.Core
             }
         }
 
-        public Task<Message> SendRequestAsync(Message message)
+        /// <summary>
+        /// Send a request message asynchronously, and return a response message.
+        /// Optionally caller can specify the milliseconds after the request should timeout.
+        /// </summary>
+        /// <param name="message">The request message.</param>
+        /// <param name="timeout">Milliseconds after which the request should timeout.</param>
+        /// <returns>The response message received or exception if request timed out.</returns>
+        public Task<Message> SendRequestAsync(Message message, int timeout)
         {
-            throw new NotImplementedException();
+            if (timeout <= 0)
+                throw new ArgumentException("Timeout value must be greater than zero: " + timeout);
+
+            return SendRequestAsyncInternal(message, timeout);
         }
 
-        public Task<bool> SubscribeAsync(Destination destination, bool flowStartState = false)
+        private async Task<Message> SendRequestAsyncInternal(Message message, int timeout)
         {
-            if(!(destination is Topic || destination is Queue))
-                throw new ArgumentException("Destination must be a queue or topic.");
+            // Setup the message parameters if unset.
+            if (message.ReplyTo == null)
+                message.ReplyTo = p2pInboxInUse;
+
+            if (string.IsNullOrEmpty(message.CorrelationId))
+                message.CorrelationId = Guid.NewGuid().ToString();
+
+            var tcs = new TaskCompletionSource<Message>();
+            var requestCtx = new RequestContext(message, tcs);
+
+            try
+            {
+                logger.LogDebug("Beginning request to destation:{0} with correlationId: {1}", message.Destination, message.CorrelationId);
+                requestMgr.RegisterRequest(requestCtx, timeout);
+                await SendAsync(message).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                requestMgr.CancelImmediately(requestCtx);
+                throw new MessagingException(e.Message, e);
+            }
+            return await tcs.Task.ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Subscribes to the destination on the Solace Event Broker asynchronously.
+        /// Optionally caller can provide a buffer to dispatch messages received on this
+        /// subscription. Default is null, which means received messages will be dispatched
+        /// to the default message buffer provided during initialization. When subscribing
+        /// to a queue destination, you can optionaly specific to start receiving
+        /// messages immediately or postpone until explicitly started. Does not apply
+        /// to Topic destinations. If set to false (default) then caller must call
+        /// StartSubscribe(Queue) to starting receiving messages.
+        /// <br/>
+        /// Future: support will be added for auto-provisioning of queues and topic
+        /// subscriptions on queues.
+        /// </summary>
+        /// <param name="destination">A Topic or Queue destination</param>
+        /// <param name="messageQueue">Optional message buffer to dispatch received messages to.</param>
+        /// <param name="flowEventQueue">Optional event buffer for receiving flow events and flow state changes.</param>
+        /// <param name="flowStartState">Optional start state when subscribing to a queue destination. Does not apply to Topic destinations.</param>
+        /// <returns></returns>
+        public Task<bool> SubscribeAsync(Destination destination, BufferBlock<Message>  messageQueue = null,
+            BufferBlock<FlowStateContext> flowEventQueue = null, bool flowStartState = false)
+        {
             if (destination != null)
-                throw new ArgumentNullException("Destination cannot be null");
+                throw new ArgumentNullException(nameof(destination), "Destination cannot be null");
 
             if (destination is Topic)
-                return SubscribeTopicAsyncInternal((Topic)destination);
+                return SubscribeTopicAsyncInternal((Topic)destination, messageQueue);
             else if (destination is Queue)
-                return SubscribeQueueAsyncInternal((Queue)destination, flowStartState);
+                return SubscribeQueueAsyncInternal((Queue)destination, messageQueue, flowEventQueue, flowStartState);
+            else
+                throw new ArgumentException("Destination must be a queue or topic.", nameof(destination));
         }
 
-        public async Task<bool> SubscribeTopicAsyncInternal(Topic topic)
+        private async Task<bool> SubscribeTopicAsyncInternal(Topic topic, BufferBlock<Message> messageQueue = null)
         {
             ITopic solTopic = ContextFactory.Instance.CreateTopic(topic.Name);
             FlowBindings.FlowBindingElement binding = null;
-            bool newSubscription = _clientBindings.AddBinding(t, client, out binding);
+            if(messageQueue == null)
+            {
+                // Use default message block
+                messageQueue = defaultAppMsgQueue;
+            }
+            bool newSubscription = flowBindings.AddBinding(topic, messageQueue, null, out binding);
             if (newSubscription && binding != null)
             {
                 try
                 {
-                    // add to solace message bus
-                    IDispatchTarget dTarget = _solSession.CreateDispatchTarget(solTopic,
-                                                                               (sender, msgEv) =>
-                                                                               {
-                                                                                   AcceptMessageEvent(msgEv, binding);
-                                                                               });
+                    TaskCompletionSource<SessionEventArgs> tcs = new TaskCompletionSource<SessionEventArgs>();
+                    IDispatchTarget dTarget = session.CreateDispatchTarget(solTopic,
+                        async (sender, msgEv) => await AcceptMessageEventAsync(msgEv, binding).ConfigureAwait(false));
                     binding.TopicDispatchTarget = dTarget;
-                    _solSession.Subscribe(dTarget, SubscribeFlag.RequestConfirm | SubscribeFlag.WaitForConfirm, null);
-                    Debug.Assert((binding.Flow != null) ^ (binding.TopicDispatchTarget != null),
-                                 "Binding should have one of Flow/Topic");
+                    session.Subscribe(dTarget, SubscribeFlag.RequestConfirm, tcs);
+
+                    // Check subscription result
+                    var result = await tcs.Task.ConfigureAwait(false);
+                    if (result.Event == SessionEvent.SubscriptionOk)
+                        return true;
+                    else
+                    {
+                        logger.LogError("Subscription error to topic: {0} responseCode {1} errorInfo: {2}",
+                            topic.Name, result.ResponseCode, result.Info);
+                        return false;
+                    }
                 }
                 catch (Exception e)
                 {
                     binding.TopicDispatchTarget = null;
-                    _clientBindings.RemoveBinding(t, client, out binding);
-                    throw WrapException(e);
+                    flowBindings.RemoveBinding(topic, out binding);
+                    throw new MessagingException(e.Message, e);
                 }
             }
+
+            if (!newSubscription && binding != null)
+            {
+                // If existing subscription then ignore and return success
+                return true;
+            }
+            return false;
         }
 
-        public Task<bool> UnsubscribeAsync(Destination destination)
+        private async Task<bool> SubscribeQueueAsyncInternal(Queue queue, BufferBlock<Message> messageQueue = null,
+            BufferBlock<FlowStateContext> flowEvtQueue = null, bool flowStartState = false)
         {
-            throw new NotImplementedException();
+            FlowBindings.FlowBindingElement binding = null;
+            if (messageQueue == null)
+            {
+                // Use default message block
+                messageQueue = defaultAppMsgQueue;
+            }
+            bool newSubscription = flowBindings.AddBinding(queue, messageQueue, flowEvtQueue, out binding);
+            if (newSubscription && binding != null)
+            {
+                try
+                {
+                    // Configure flow properties
+                    var fp = new FlowProperties
+                    {
+                        AckMode = solaceOptions.ClientAck ? MessageAckMode.ClientAck : MessageAckMode.AutoAck,
+                        BindBlocking = false, // ensure we bind in non-blocking mode
+                        FlowStartState = flowStartState
+                    };
+
+                    // Destination
+                    IEndpoint solQueue = null;
+                    if (queue.IsTemporary)
+                        solQueue = session.CreateTemporaryQueue(queue.Name);
+                    else
+                        solQueue = ContextFactory.Instance.CreateQueue(queue.Name);
+
+                    // Create the flow
+                    TaskCompletionSource<bool> tcs = new TaskCompletionSource<bool>();
+                    IFlow flow = session.CreateFlow(
+                        fp,
+                        solQueue,
+                        null,
+                        async (sender, msgEv) => { await AcceptMessageEventAsync(msgEv, binding).ConfigureAwait(false); },
+                        async (sender, flowEv) =>
+                        {
+                            logger.LogDebug("FlowEvent: {0}, Info: {1}", flowEv.Event, flowEv.Info);
+                            var flowStateCtx = new FlowStateContext() { Info = flowEv.Info, ResponseCode = flowEv.ResponseCode };
+                            switch (flowEv.Event)
+                            {
+                                case FlowEvent.UpNotice:
+                                    flowStateCtx.State = FlowState.Up;
+                                    tcs.TrySetResult(true);
+                                    break;
+                                case FlowEvent.BindFailedError:
+                                    flowStateCtx.State = FlowState.BindFailedError;
+                                    logger.LogWarning(string.Format("Queue connection failure: {0}", flowEv.Event.ToString()));
+                                    tcs.TrySetResult(false);
+                                    break;
+                                case FlowEvent.DownError:
+                                    flowStateCtx.State = FlowState.Down;
+                                    break;
+                                case FlowEvent.FlowActive:
+                                    flowStateCtx.State = FlowState.FlowActive;
+                                    break;
+                                case FlowEvent.FlowInactive:
+                                    flowStateCtx.State = FlowState.FlowInactive;
+                                    break;
+                                default:
+                                    break;
+                            }
+
+                            // Notify caller of the flow event
+                            await binding.DispatchFlowEventAsync(flowStateCtx).ConfigureAwait(false);
+                        });
+                    binding.Flow = flow;
+                    return await tcs.Task.ConfigureAwait(false);
+                }
+                catch (Exception e)
+                {
+                    binding.Flow = null;
+                    flowBindings.RemoveBinding(queue, out binding);
+                    throw new MessagingException(e.Message, e);
+                }
+            }
+
+            if (!newSubscription && binding != null)
+            {
+                // If existing subscription then ignore and return success
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Unsubscribes from the destination asynchronously. For Queue destinations
+        /// the flow is unbound and destroyed. Caller will also receive a flow state
+        /// changed event if flow events were configured during subscribe.
+        /// </summary>
+        /// <param name="destination">The destination to unsubscribe.</param>
+        /// <returns>True if the subscription was removed succussfully, false otherwise.</returns>
+        public async Task<bool> UnsubscribeAsync(Destination destination)
+        {
+            FlowBindings.FlowBindingElement bind = null;
+            var removed = flowBindings.RemoveBinding(destination, out bind);
+            if (removed && bind != null)
+            {
+                try
+                {
+                    // Unbind from queue if a flow is configured
+                    if (bind.Flow != null)
+                    {
+                        bind.Flow.Stop();
+                        // 100 ms delay to avoid race-condition if still receiving msgs
+                        // and calling Flow.Ack which may cause deadlock and flow destroy will timeout.
+                        await Task.Delay(100);
+                        bind.Flow.Dispose();
+                        bind.Flow = null;
+                        return true;
+                    }
+                    // Unsubscribe from topic if topic dispatcher is configured
+                    if (bind.TopicDispatchTarget != null)
+                    {
+                        TaskCompletionSource<SessionEventArgs> tcs = new TaskCompletionSource<SessionEventArgs>();
+                        session.Unsubscribe(bind.TopicDispatchTarget, SubscribeFlag.RequestConfirm, tcs);
+                        // Check unsubscribe result
+                        var result = await tcs.Task.ConfigureAwait(false);
+                        // Solace API use Subscription OK events for both subscribe and unsubscribe
+                        if (result.Event == SessionEvent.SubscriptionOk)
+                            return true;
+                        else
+                        {
+                            logger.LogError("Unsubscribe error to topic: {0} responseCode {1} errorInfo: {2}",
+                                bind.Destination.Name, result.ResponseCode, result.Info);
+                            return false;
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    throw new MessagingException(e.Message, e);
+                }
+            }
+            return true;
         }
 
         #region Helper Methods
@@ -355,8 +564,6 @@ namespace SolaceDotNetWrapper.Core
             }
         }
 
-        
-
         /// <summary>
         /// Log delegate for redirecting Solace .NET API logs to the wrapper's
         /// logging abstraction.
@@ -378,7 +585,7 @@ namespace SolaceDotNetWrapper.Core
             {
                 Message rxMessage = SolaceNativeMsgAdapter.ConvertFromNativeMsg(msgEv.Message);
 
-                bool continueDelivery = await requestMgr.HandleIncomingAsync(rxMessage).ConfigureAwait(false);
+                bool continueDelivery = requestMgr.HandleIncoming(rxMessage);
 
                 // If continueDelivery is false, the message was handled by the requestMgr so we drop it.
                 if (continueDelivery && binding != null)
@@ -389,7 +596,7 @@ namespace SolaceDotNetWrapper.Core
                 {
                     // There is no callback on which to forward the message to, so dispatch
                     // the message to the default session callback.
-                    await messageQueue.SendAsync(rxMessage).ConfigureAwait(false);
+                    await defaultAppMsgQueue.SendAsync(rxMessage).ConfigureAwait(false);
                 }
             }
             finally
@@ -438,6 +645,11 @@ namespace SolaceDotNetWrapper.Core
                 case SessionEvent.UpNotice:
                     await OnStateChangedAsync(ConnectionState.Opened, e).ConfigureAwait(false);
                     break;
+                case SessionEvent.SubscriptionOk:
+                case SessionEvent.SubscriptionError:
+                    var tcs = (e.CorrelationKey as TaskCompletionSource<SessionEventArgs>);
+                    tcs.TrySetResult(e);
+                    break;
             }
         }
 
@@ -454,6 +666,7 @@ namespace SolaceDotNetWrapper.Core
             if (tcsConnection != null)
                 tcsConnection.TrySetResult(connectionEvent);
 
+            // Notify observers if registered
             foreach (var observer in connectionEvtObservers)
                 await observer.SendAsync(connectionEvent).ConfigureAwait(false);
         }

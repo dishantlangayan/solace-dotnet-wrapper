@@ -17,7 +17,6 @@
 
 using System;
 using System.Threading;
-using SolaceDotNetWrapper.Core.Utils;
 
 namespace SolaceDotNetWrapper.Core
 {
@@ -39,10 +38,7 @@ namespace SolaceDotNetWrapper.Core
             int decrValue = Interlocked.Decrement(ref _expectedAcks);
             if (decrValue == 0 && AckHandlerFunction != null)
             {
-                long adMessageId = (Headers.ContainsKey(SolaceHeadersStr.AdMessageId))
-                                       ? (long)Headers[SolaceHeadersStr.AdMessageId]
-                                       : 0;
-                AckHandlerFunction(adMessageId);
+                AckHandlerFunction(AdMessageId);
             }
         }
 

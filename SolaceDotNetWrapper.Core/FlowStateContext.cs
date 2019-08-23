@@ -16,24 +16,15 @@
 //  ------------------------------------------------------------------------------------
 
 using System;
-using System.Threading.Tasks;
-using System.Threading.Tasks.Dataflow;
-using SolaceSystems.Solclient.Messaging;
 
 namespace SolaceDotNetWrapper.Core
 {
-    public interface IConnection
+    public class FlowStateContext
     {
-        Task<ConnectionEvent> ConnectAsync();
+        public FlowState State { get; set; }
 
-        Task DisconnectAsync();
+        public string Info { get; set; }
 
-        Task<MessageCorrelationContext> SendAsync(Message message);
-
-        Task<Message> SendRequestAsync(Message message, int timeout);
-
-        Task<bool> SubscribeAsync(Destination destination, BufferBlock<Message> messageQueue = null, BufferBlock<FlowStateContext> flowEventQueue = null, bool flowStartState = false);
-
-        Task<bool> UnsubscribeAsync(Destination destination);
+        public int ResponseCode { get; set; }
     }
 }

@@ -21,7 +21,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
 using Microsoft.Extensions.Logging;
-using SolaceDotNetWrapper.Core.Utils;
 using SolaceSystems.Solclient.Messaging;
 
 namespace SolaceDotNetWrapper.Core
@@ -41,7 +40,7 @@ namespace SolaceDotNetWrapper.Core
             this.logger = logger;
         }
 
-        public bool AddBinding(Destination dest, BufferBlock<Message> messageQueue, out FlowBindingElement bind)
+        public bool AddBinding(Destination dest, BufferBlock<Message> messageQueue, BufferBlock<FlowStateContext> flowEvtQueue, out FlowBindingElement bind)
         {
             string key = MakeDestinationKey(dest);
             bool created = false;
@@ -49,7 +48,7 @@ namespace SolaceDotNetWrapper.Core
             {
                 if (!bindings.ContainsKey(key))
                 {
-                    bindings.Add(key, new FlowBindingElement(dest, messageQueue, logger));
+                    bindings.Add(key, new FlowBindingElement(dest, messageQueue, flowEvtQueue, logger));
                     created = true;
                 }
                 bind = bindings[key];
@@ -106,15 +105,18 @@ namespace SolaceDotNetWrapper.Core
         {
             private readonly ILogger logger;
 
-            public FlowBindingElement(Destination dest, BufferBlock<Message> messageQueue, ILogger logger)
+            public FlowBindingElement(Destination dest, BufferBlock<Message> messageQueue,
+                BufferBlock<FlowStateContext> flowEvtQueue, ILogger logger)
             {
                 Destination = dest;
                 MessageQueue = messageQueue;
+                FlowEventQueue = flowEvtQueue;
                 this.logger = logger;
             }
 
             public Destination Destination { get; set; }
             public BufferBlock<Message> MessageQueue { get; set; }
+            public BufferBlock<FlowStateContext> FlowEventQueue { get; set; }
 
             public IFlow Flow { get; set; }
             public IDispatchTarget TopicDispatchTarget { get; set; }
@@ -136,10 +138,23 @@ namespace SolaceDotNetWrapper.Core
                 }
             }
 
+            public Task DispatchFlowEventAsync(FlowStateContext flowStateCtx)
+            {
+                // Quick check to see if we have a buffer to forward events to
+                if (FlowEventQueue == null)
+                    return Task.FromResult(0);
+
+                return DispatchFlowEventAsyncInternal(flowStateCtx);
+            }
+
+            private async Task DispatchFlowEventAsyncInternal(FlowStateContext flowStateCtx)
+            {
+                await FlowEventQueue.SendAsync(flowStateCtx).ConfigureAwait(false);
+            }
+
             public async Task DispatchMessageAsync(Message msg)
             {
-                var adMessageId = (long)msg.Headers[SolaceHeadersStr.AdMessageId];
-                bool isAppAck = (msg is PersistentMessage && Flow != null && adMessageId != 0);
+                bool isAppAck = (msg is PersistentMessage && Flow != null && msg.AdMessageId != 0);
 
                 if (isAppAck)
                 {

@@ -20,7 +20,7 @@ using System.Collections.Generic;
 using SolaceSystems.Solclient.Messaging;
 using SolaceSystems.Solclient.Messaging.SDT;
 
-namespace SolaceDotNetWrapper.Core.Utils
+namespace SolaceDotNetWrapper.Core
 {
     /// <summary>
     /// Helper class to convert Solace native messages to wrapper api messages

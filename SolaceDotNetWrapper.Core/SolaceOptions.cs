@@ -27,7 +27,7 @@ namespace SolaceDotNetWrapper.Core
     public class SolaceOptions
     {
         // Basic connection properties
-        public string Host { get; set; };
+        public string Host { get; set; }
         public string MsgVpnName { get; set; } = "default";
         public string Username { get; set; } = "default";
         public string Password { get; set; }
@@ -39,6 +39,10 @@ namespace SolaceDotNetWrapper.Core
         public int ReconnectRetriesWaitInMs { get; set; } = 3000;
 
         // Misc Solace API properties
+        //
+        // Ack mode - default is to auto ack
+        public bool ClientAck { get; set; } = false;
+
         // TODO: add support for other session props
 
         // Wrapper API Properties
