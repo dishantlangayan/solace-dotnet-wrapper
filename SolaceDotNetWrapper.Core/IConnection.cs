@@ -35,5 +35,7 @@ namespace SolaceDotNetWrapper.Core
         Task<bool> SubscribeAsync(Destination destination, BufferBlock<Message> messageQueue = null, BufferBlock<FlowStateContext> flowEventQueue = null, bool flowStartState = false);
 
         Task<bool> UnsubscribeAsync(Destination destination);
+
+        void RegisterConnectionEvents(BufferBlock<ConnectionEvent> eventQueue);
     }
 }
