@@ -73,7 +73,7 @@ namespace SolaceDotNetWrapper.Core
         /// <returns></returns>
         public bool HandleIncoming(Message msg)
         {
-            if (!(msg.IsReplyMessage || string.IsNullOrEmpty(msg.CorrelationId)))
+            if (!msg.IsReplyMessage)
             {
                 // Not a response message, continue.
                 return true; // continueProcessing

@@ -39,9 +39,6 @@ namespace SolaceDotNetWrapper.Core
         private static readonly object _syncLock = new Object();
 
         private bool isInitialized = false;
-        private bool alreadyAddedLocalTopic = false;
-        private Destination p2pInboxInUse = null;
-
         private volatile ConnectionState connectionState = ConnectionState.Created;
 
         private IContext context = null;
@@ -55,10 +52,7 @@ namespace SolaceDotNetWrapper.Core
         // Task completion source for asynchronously waiting for the connection UP event
         TaskCompletionSource<ConnectionEvent> tcsConnection = null;
 
-        public Destination ClientP2PInbox
-        {
-            get { return p2pInboxInUse; }
-        }
+        public Destination ClientP2PInbox { get; private set; }
 
         public SolaceConnection(SolaceOptions solaceOptions, BufferBlock<Message> defaultAppMsgQueue, ILoggerFactory loggerFactory)
         {
@@ -123,7 +117,7 @@ namespace SolaceDotNetWrapper.Core
             sessionProps.TopicDispatch = true;
 
             // Create the session with the event handlers
-            session = context.CreateSession(solaceOptions.ToSessionProperties(), MessageEventHandler, SessionEventHandler);
+            session = context.CreateSession(sessionProps, MessageEventHandler, SessionEventHandler);
 
             // Connect the session - non-blocking
             var returnCode = session.Connect();
@@ -140,22 +134,7 @@ namespace SolaceDotNetWrapper.Core
                 if (connectionEvent.State == ConnectionState.Opened)
                 {
                     var p2pinbox = session.GetProperty(SessionProperties.PROPERTY.P2PInboxInUse) as string;
-                    p2pInboxInUse = new Topic(p2pinbox);
-
-                    // Create a local topic subscription. This is required when Topic Dispatch is enabled
-                    // in the Solace API and client adds subscriptions using a subscription manager
-                    // (i.e. on-behalf of subscriptions). This is a local subscription only and request
-                    // is not sent to the appliance.
-                    // Also don't readd the local topic when reconnecting.
-                    if (!alreadyAddedLocalTopic)
-                    {
-                        ITopic solTopic = ContextFactory.Instance.CreateTopic(">");
-                        IDispatchTarget target = session.CreateDispatchTarget(solTopic,
-                            async (sender, msgEv) => await AcceptMessageEventAsync(msgEv, null).ConfigureAwait(false));
-
-                        session.Subscribe(target, SubscribeFlag.LocalDispatchOnly, null);
-                        alreadyAddedLocalTopic = true;
-                    }
+                    ClientP2PInbox = new Topic(p2pinbox);
                 }
             }
 
@@ -275,7 +254,7 @@ namespace SolaceDotNetWrapper.Core
         {
             // Setup the message parameters if unset.
             if (message.ReplyTo == null)
-                message.ReplyTo = p2pInboxInUse;
+                message.ReplyTo = ClientP2PInbox;
 
             if (string.IsNullOrEmpty(message.CorrelationId))
                 message.CorrelationId = Guid.NewGuid().ToString();
@@ -318,7 +297,7 @@ namespace SolaceDotNetWrapper.Core
         public Task<bool> SubscribeAsync(Destination destination, BufferBlock<Message>  messageQueue = null,
             BufferBlock<FlowStateContext> flowEventQueue = null, bool flowStartState = false)
         {
-            if (destination != null)
+            if (destination == null)
                 throw new ArgumentNullException(nameof(destination), "Destination cannot be null");
 
             if (destination is Topic)
