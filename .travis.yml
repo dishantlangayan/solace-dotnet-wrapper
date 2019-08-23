@@ -1,0 +1,8 @@
+language: csharp
+solution: solace-dotnet-wrapper.sln
+install:
+  - nuget restore solace-dotnet-wrapper.sln
+  - nuget install NUnit.Console -Version 3.9.0 -OutputDirectory testrunner
+script:
+  - msbuild /p:Configuration=Release solace-dotnet-wrapper.sln
+  - mono ./testrunner/NUnit.ConsoleRunner.3.9.0/tools/nunit3-console.exe ./Tests/SolaceDotNetWrapper.Tests/bin/Release/SolaceDotNetWrapper.Tests.dll
