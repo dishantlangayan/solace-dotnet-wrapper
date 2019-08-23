@@ -33,10 +33,9 @@ namespace SolaceDotNetWrapper.Core
         public string Password { get; set; }
 
         // Reconnect properties
-        public int ReconnectRetries { get; set; } = 5;
-        public int ConnectRetries { get; set; } = 1;
-        public int ConnectRetriesPerHost { get; set; } = 20;
-        public int ReconnectRetriesWaitInMs { get; set; } = 3000;
+        public bool AutoReconnect { get; set; } = true;
+        public int AutoReconnectRetries { get; set; } = 100;
+        public int AutoReconnectWaitinMs { get; set; } = 3000;
 
         // Misc Solace API properties
         //
@@ -55,10 +54,11 @@ namespace SolaceDotNetWrapper.Core
             sessionProps.VPNName = MsgVpnName;
             sessionProps.UserName = Username;
             sessionProps.Password = Password;
-            sessionProps.ReconnectRetries = ReconnectRetries;
-            sessionProps.ConnectRetries = ConnectRetries;
-            sessionProps.ConnectRetriesPerHost = ConnectRetriesPerHost;
-            sessionProps.ReconnectRetriesWaitInMsecs = ReconnectRetriesWaitInMs;
+            if (AutoReconnect)
+            {
+                sessionProps.ReconnectRetries = AutoReconnectRetries;
+                sessionProps.ReconnectRetriesWaitInMsecs = AutoReconnectWaitinMs;
+            }
             return sessionProps;
         }
     }

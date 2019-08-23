@@ -4,6 +4,9 @@
     <TargetFramework>netcoreapp2.2</TargetFramework>
 
     <IsPackable>false</IsPackable>
+    <Authors>Dishant Langayan &lt;dishantlangayan@gmail.com&gt;</Authors>
+    <Copyright>Dishant Langayan (c) 2019</Copyright>
+    <Owners>Dishant Langayan</Owners>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,4 +15,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="15.9.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\SolaceDotNetWrapper.Core\SolaceDotNetWrapper.Core.csproj" />
+  </ItemGroup>
 </Project>
